@@ -12,23 +12,73 @@ n_rollout = 10
 
 class ActorCritic(nn.Module):
     def __init__(self):
-        pass
+        super(ActorCritic, self).__init__()
+
+        self.data =[]
+
+        self.fc1 = nn.Linear(4, 256)
+        self.fc_pi = nn.Linear(256, 2)
+        self.fc_v = nn.Linear(256, 1)
+        self.optimizer = optim.Adam(self.parameters(), lr = learning_rate)
     
     def pi(self, x, softmax_dim=0):
+        x = F.relu(self.fc1(x))
+        x = self.fc_pi(x)
+        prob = F.softmax(x, dim=softmax_dim)
+        return prob
         
-        pass
 
     def v(self, x):
-        pass
+        x = F.relu(self.fc1(x))
+        v = self.fc_v(x)
+        return v
 
     def put_data(self, transition):
-        pass
+        self.data.append(transition)
 
     def make_batch(self):
-        pass
+        s_list, a_list, r_list, s_prime_list, done_list = [], [], [], [], []
+        
+        for transition in self.data:
+            s, a, r, s_prime, done = transition
+            s_list.append(s)
+            a_list.append([a])
+            r_list.append([r/100])
+            s_prime_list.append(s_prime)
+            done_mask = 0.0 if done else 1.0
+            done_list.append(done_mask)
+
+        s_batch, a_batch, r_batch, s_prime_batch, done_batch = torch.tensor(s_list, dtype=torch.float), torch.tensor(a_list), \
+                                                            torch.tensor(r_list, dtype=torch.float), torch.tensor(s_prime_list, dtype=torch.float), \
+                                                            torch.tensor(done_list, dtype=torch.float)
+        self.data = []
+        return s_batch, a_batch, r_batch, s_prime_batch, done_batch
 
     def train_net(self):
-        pass
+        s, a, r, s_prime, done = self.make_batch()
+        td_target = r + gamma * self.v(s_prime) * done
+        delta = td_target - self.v(s)
+        
+        pi = self.pi(s, softmax_dim=1)
+        pi_a = pi.gather(1,a)
+
+        loss = -torch.log(pi_a) * delta.detach() + F.smooth_l1_loss(self.v(s), td_target.detach())
+
+        self.optimizer.zero_grad()
+        loss.mean().backward()
+        self.optimizer.step()  
+        # loss1 = F.smooth_l1_loss(self.v(s), td_target.detach())
+        # loss2 = -torch.log(pi_a) * delta.detach()
+
+        # self.optimizer.zero_grad()
+        # loss1.mean().backward()
+        # self.optimizer.step()    
+
+        # self.optimizer.zero_grad()
+        # loss2.mean().backward()
+        # self.optimizer.step()      
+
+
 
 def main():
     env = gym.make("CartPole-v1")
@@ -51,13 +101,17 @@ def main():
                 s = s_prime
                 score += r
 
-                env.render()
+                # env.render()
 
                 if done:
                     break
 
-            
+            model.train_net()
 
+        if n_epi%print_interval==0 and n_epi!=0:
+            print("# of episode :{}, avg score : {:.1f}".format(n_epi, score/print_interval))
+            score = 0.0
+    env.close()
 
     
     pass
