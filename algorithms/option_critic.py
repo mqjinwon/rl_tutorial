@@ -13,13 +13,6 @@ class OptionCritic(nn.Module):
     def __init__(self, n_state, n_action, option_num = 1):
         super(OptionCritic, self).__init__()
 
-        self.device = None
-
-        if torch.cuda.is_available():
-            self.device = torch.device('cuda')
-        else:
-            self.device = torch.device('cpu')
-
         self.state_num = n_state
         self.action_num = n_action
         self.option_num = option_num
@@ -41,6 +34,7 @@ class OptionCritic(nn.Module):
             self.q_u.append(nn.Linear(256, 1))  # value
 
         self.optimizer = optim.Adam(self.parameters(), lr = LR)
+        self.cache =[]
     
     ########################
     ##### model define #####
@@ -58,7 +52,6 @@ class OptionCritic(nn.Module):
                 prob = torch.cat((prob, q_omega_value), 0)
 
         prob = F.softmax(prob, dim=0)
-        prob = prob.to(self.device)
 
         # print("policyOverOption: ", prob)
 
@@ -166,16 +159,15 @@ class OptionCritic(nn.Module):
         loss.mean().backward()
         self.optimizer.step()
 
-
-
 def main():
 
     env = gym.make('CartPole-v1')
 
     nstates = env.observation_space.shape[0]
     nactions = env.action_space.n # env.observation_space.shape[0]
+    noptions = 2
 
-    model = OptionCritic(nstates, nactions, 2)
+    model = OptionCritic(nstates, nactions, noptions)
 
     print_interval = 20
     score = 0.0
@@ -197,6 +189,7 @@ def main():
         # each step
         while not done:
 
+
             # choose a according to policy_over_option
             action_prob =  model.intraOptionPolicy(torch.from_numpy(s).float(), option)
             m = Categorical(action_prob)
@@ -206,7 +199,7 @@ def main():
 
             s = s_prime
 
-            
+            score += r
 
             # 1. option evaluation
             model.policyEvaluation(torch.from_numpy(s).float(), torch.tensor([a], dtype=torch.float), torch.tensor([r], dtype=torch.float), \
@@ -228,12 +221,6 @@ def main():
                 m = Categorical(prob)
                 option = m.sample().item()
                 # print("opion change to:", option)
-
-
-
-            # env.render()
-
-            score += r
             
             if done:
                 break   
