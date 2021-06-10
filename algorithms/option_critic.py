@@ -13,6 +13,15 @@ class OptionCritic(nn.Module):
     def __init__(self, n_state, n_action, option_num = 1):
         super(OptionCritic, self).__init__()
 
+        self.device = None
+
+        if torch.cuda.is_available():
+            self.device = torch.device('cuda')
+        else:
+            self.device = torch.device('cpu')
+
+        self.state_num = n_state
+        self.action_num = n_action
         self.option_num = option_num
 
         self.shared_layer = nn.Linear(n_state, 256)
@@ -24,13 +33,11 @@ class OptionCritic(nn.Module):
         self.termination = []
 
         # critic parameter
-        self.q_omega = []
         self.q_u = []
 
         for i in range(option_num):
             self.intra_option_policy.append(nn.Linear(256, n_action)) # policy
             self.termination.append(nn.Linear(256, 1))  # terminate or not
-            self.q_omega.append(nn.Linear(256, 1))
             self.q_u.append(nn.Linear(256, 1))  # value
 
         self.optimizer = optim.Adam(self.parameters(), lr = LR)
@@ -40,8 +47,8 @@ class OptionCritic(nn.Module):
     ########################
 
     def policyOverOption(self, x):
-        prob = None
 
+        prob = None
         for i in range(self.option_num):
 
             q_omega_value = self.qOmega(x, i)
@@ -51,8 +58,9 @@ class OptionCritic(nn.Module):
                 prob = torch.cat((prob, q_omega_value), 0)
 
         prob = F.softmax(prob, dim=0)
+        prob = prob.to(self.device)
 
-        
+        # print("policyOverOption: ", prob)
 
         return prob
 
@@ -70,11 +78,23 @@ class OptionCritic(nn.Module):
 
         return prob
 
-    def qOmega(self, x, option_num=0):
-        x = self.shared_layer(x)
-        x = self.q_omega[option_num](x)
+    def qOmega(self, s, option_num=0):
+        intra_option = self.intraOptionPolicy(s, option_num)
 
-        return x
+        qu = None
+        for i in range(self.action_num):
+            tmp_qu = self.qU(s, torch.tensor([i], dtype=torch.float), option_num)
+            if qu == None:
+                qu = tmp_qu
+            else:
+                qu = torch.cat((qu, tmp_qu), 0)
+
+        x = torch.dot(intra_option, qu)
+
+        # print("intra_option: ", intra_option)
+        # print("qu: ", qu)
+
+        return torch.unsqueeze(x, 0)
 
     def qU(self, s, a, option_num=0):
         x = torch.cat((s,a), 0)
@@ -89,7 +109,7 @@ class OptionCritic(nn.Module):
 
     def policyEvaluation(self, s, a, r, s_prime, done, option):
 		# One step target for Q_omega
-        target = r
+        target = r - self.qU(s, a, option)
 
         if not done:
             # get max q_omega from other options
@@ -104,14 +124,12 @@ class OptionCritic(nn.Module):
                         best_other_q_omega = tmp_Q_omega
 
             # get target
-            beta_omega = self.terminationPolicy(s_prime, option)  
+            beta_omega = self.terminationPolicy(s_prime, option)
+            # print(beta_omega)
             target += GAMMA * ((1.0 - beta_omega)*self.qOmega(s_prime, option) + beta_omega*best_other_q_omega)
 
         # evaluation
-        tderror_q_omega = F.smooth_l1_loss(target.detach(), self.qOmega(s, option))
-        tderror_q_u = F.smooth_l1_loss(target.detach(), self.qU(s, a, option))
-
-        loss = tderror_q_omega + tderror_q_u
+        loss = target
 
         self.optimizer.zero_grad()
         loss.mean().backward()
@@ -131,17 +149,17 @@ class OptionCritic(nn.Module):
         pass
 
     def terminationPolicyImprovement(self, termin_prob, s_prime, option=0):
-        v_omega = None
+        best_other_q_omega = None
 
         for i in range(self.option_num):
-            if v_omega is None:
-                v_omega = self.qOmega(s_prime, option)
+            if best_other_q_omega is None:
+                best_other_q_omega = self.qOmega(s_prime, option)
             else:
-                v_omega += self.qOmega(s_prime, i)
+                tmp_Q_omega = self.qOmega(s_prime, i)
+                if best_other_q_omega < tmp_Q_omega:
+                    best_other_q_omega = tmp_Q_omega
 
-        v_omega = v_omega / self.option_num
-
-        advantage = self.qOmega(s_prime, option) - v_omega
+        advantage = self.qOmega(s_prime, option) - best_other_q_omega
         loss = termin_prob * advantage
 
         self.optimizer.zero_grad()
@@ -151,6 +169,7 @@ class OptionCritic(nn.Module):
 
 
 def main():
+
     env = gym.make('CartPole-v1')
 
     nstates = env.observation_space.shape[0]
@@ -158,10 +177,13 @@ def main():
 
     model = OptionCritic(nstates, nactions, 2)
 
-    print_interval = 0
+    print_interval = 20
+    score = 0.0
 
     # each episode
     for n_epi in range(10000):
+
+        # environment initialization
         done = False
         s = env.reset()
 
@@ -184,6 +206,8 @@ def main():
 
             s = s_prime
 
+            
+
             # 1. option evaluation
             model.policyEvaluation(torch.from_numpy(s).float(), torch.tensor([a], dtype=torch.float), torch.tensor([r], dtype=torch.float), \
                                      torch.from_numpy(s_prime).float(), done, option)
@@ -192,7 +216,6 @@ def main():
             # if termination in s_prime
             # choose new w according to an epsilon-soft policy over options
             termin_prob = model.terminationPolicy(torch.from_numpy(s_prime).float(), option)
-            # print(termin_prob)
             terminate_flag = round(termin_prob.detach().numpy()[0])
 
             # 2. option improvement
@@ -200,12 +223,11 @@ def main():
             model.terminationPolicyImprovement(termin_prob, torch.from_numpy(s_prime).float(), option)
 
             # if terminate
-            if terminate_flag is 1:
+            if terminate_flag == 1:
                 prob = model.policyOverOption(torch.from_numpy(s_prime).float())
                 m = Categorical(prob)
                 option = m.sample().item()
-                print(terminate_flag)
-                print("opion change to:", option)
+                # print("opion change to:", option)
 
 
 
@@ -214,17 +236,13 @@ def main():
             score += r
             
             if done:
-                break         
-        print_interval += 1
-        if print_interval == 100:
-            print("option:", option, "score: ", score)
-            score = 0
-            print_interval = 0
-            
-    env.close()
+                break   
 
-    
-    pass
+        if n_epi%print_interval==0 and n_epi!=0:
+            print("# of episode :{}, avg score : {:.1f}".format(n_epi, score/print_interval))
+            score = 0.0
+
+    env.close()
 
 if __name__ == '__main__':
     main()
